@@ -1,5 +1,9 @@
 import io
 import json
+import os
+import tempfile
+import subprocess
+import mimetypes
 import streamlit as st
 import google.generativeai as genai
 from docx import Document
@@ -12,15 +16,13 @@ st.title("🚚 Автоматическое формирование Актов 
 # --- НАСТРОЙКА КЛЮЧА GEMINI ---
 with st.sidebar:
     st.header("⚙️ Настройки AI")
-    # Пробуем взять из секретов облака или из поля ввода
     default_key = st.secrets.get("GEMINI_API_KEY", "")
     api_key = st.text_input("Gemini API Key", value=default_key, type="password")
 
 # --- РАСПОЗНАВАНИЕ ЧЕРЕЗ GEMINI ---
-st.subheader("1. Загрузка документа (PDF, PNG, JPG)")
-uploaded_file = st.file_uploader("Загрузите договор-заявку или скан", type=["pdf", "png", "jpg", "jpeg"])
+st.subheader("1. Загрузка документа (любой формат)")
+uploaded_file = st.file_uploader("Загрузите файл документа (PDF, фото, DOCX, TXT и др.)")
 
-# Значения по умолчанию для формы
 if "doc_data" not in st.session_state:
     st.session_state.doc_data = {
         "doc_num": "20",
@@ -43,18 +45,23 @@ if "doc_data" not in st.session_state:
     }
 
 if st.button("🤖 Распознать документ через AI"):
-    if not api_key:
-        st.error("Укажите Gemini API Key в левой панели!")
+    final_key = api_key or default_key
+    if not final_key:
+        st.error("Укажите Gemini API Key!")
     elif not uploaded_file:
-        st.warning("Загрузите файл документа.")
+        st.warning("Сначала выберите файл для загрузки.")
     else:
         try:
-            genai.configure(api_key=api_key)
+            genai.configure(api_key=final_key)
             model = genai.GenerativeModel("gemini-3.6-flash")
 
-            with st.spinner("Нейросеть считывает реквизиты и данные перевозки..."):
+            with st.spinner("Нейросеть считывает данные из файла..."):
                 file_bytes = uploaded_file.getvalue()
                 mime_type = uploaded_file.type
+                if not mime_type:
+                    mime_type, _ = mimetypes.guess_type(uploaded_file.name)
+                if not mime_type:
+                    mime_type = "application/octet-stream"
 
                 prompt = """
                 Проанализируй документ (заявку/договор на грузоперевозку) и верни данные В СТРОГОМ JSON-формате без лишних слов и без разметки markdown.
@@ -65,17 +72,17 @@ if st.button("🤖 Распознать документ через AI"):
                     "order_num": "номер заказа",
                     "order_date": "дата заказа",
                     "city": "г. Смоленск",
-                    "customer_name": "название Заказчика (например, ООО «ФорГлэйд»)",
+                    "customer_name": "название Заказчика",
                     "customer_director": "ФИО директора Заказчика в родительном падеже",
                     "customer_details": "УНП, юридический адрес и банковские реквизиты Заказчика",
                     "customer_signer": "Фамилия И.О. подписывающего со стороны Заказчика",
                     "route": "Маршрут перевозки (откуда - куда)",
                     "transport_details": "Марка, гос. номер авто, прицепа и ФИО водителя",
                     "cmr_numbers": "номера CMR (если указаны, иначе б/н)",
-                    "amount_num": "сумма цифрами (например, 1 080,00)",
+                    "amount_num": "сумма цифрами",
                     "amount_words": "сумма прописью",
-                    "currency": "валюта платежа (белорусских рублей / российских рублей / евро)",
-                    "nds": "ставка НДС (например, 0% или Без НДС)",
+                    "currency": "валюта платежа",
+                    "nds": "ставка НДС",
                     "payment_terms": "условия и сроки оплаты"
                 }
                 """
@@ -85,11 +92,10 @@ if st.button("🤖 Распознать документ через AI"):
                     prompt
                 ])
 
-                # Очистка и парсинг JSON
                 raw_text = response.text.strip().replace("```json", "").replace("```", "")
                 parsed_json = json.loads(raw_text)
                 st.session_state.doc_data.update(parsed_json)
-                st.success("Данные успешно извлечены нейросетью!")
+                st.success("Данные успешно извлечены!")
 
         except Exception as e:
             st.error(f"Ошибка распознавания: {e}")
@@ -125,26 +131,18 @@ with col2:
     nds = st.text_input("НДС", value=data.get("nds", "0%"))
     payment_terms = st.text_input("Условия оплаты", value=data.get("payment_terms", ""))
 
-# --- ФУНКЦИИ ГЕНЕРАЦИИ DOCX ---
-def generate_invoice():
+# --- ФУНКЦИИ ГЕНЕРАЦИИ СЧЕТА И АКТА ---
+def build_invoice_doc():
     doc = Document()
-    
-    # Шапка банка (таблица реквизитов)
     table_bank = doc.add_table(rows=2, cols=2)
     table_bank.style = 'Table Grid'
     
-    c0 = table_bank.rows[0].cells[0]
-    c0.text = "АО \"АЛЬФА-БАНК\"\nБанк получателя"
-    c1 = table_bank.rows[0].cells[1]
-    c1.text = "БИК: 044525593\nСч.№: 30101810200000000593"
-    
-    c2 = table_bank.rows[1].cells[0]
-    c2.text = "ИНН: 6700042504 | КПП: 670001001\nООО \"АВРОРА-ТРАНЗИТ\"\nПолучатель"
-    c3 = table_bank.rows[1].cells[1]
-    c3.text = "Сч.№: 40702810901130005079"
+    table_bank.rows[0].cells[0].text = "АО \"АЛЬФА-БАНК\"\nБанк получателя"
+    table_bank.rows[0].cells[1].text = "БИК: 044525593\nСч.№: 30101810200000000593"
+    table_bank.rows[1].cells[0].text = "ИНН: 6700042504 | КПП: 670001001\nООО \"АВРОРА-ТРАНЗИТ\"\nПолучатель"
+    table_bank.rows[1].cells[1].text = "Сч.№: 40702810901130005079"
 
     doc.add_paragraph()
-    
     p_party = doc.add_paragraph()
     p_party.add_run("Исполнитель: ").bold = True
     p_party.add_run("ООО \"АВРОРА-ТРАНЗИТ\", 214022, РОССИЯ, Смоленская область, Смоленск, ул Карбышева, 15а, 2, К 52\n")
@@ -185,9 +183,8 @@ def generate_invoice():
     buf.seek(0)
     return buf
 
-def generate_act():
+def build_act_doc():
     doc = Document()
-    
     h = doc.add_paragraph()
     h.alignment = WD_ALIGN_PARAGRAPH.CENTER
     r1 = h.add_run(f"Акт выполненных работ № {doc_num}\nоб оказании услуг\nпо транспортному заказу № {order_num} от {order_date} г.")
@@ -235,7 +232,6 @@ def generate_act():
     )
     
     doc.add_paragraph("\n")
-    
     table = doc.add_table(rows=2, cols=2)
     table.rows[0].cells[0].text = f"{customer_name}\n{customer_details}"
     table.rows[0].cells[1].text = "ООО «АВРОРА-ТРАНЗИТ»\n214022, РФ г. Смоленск\nул. Карбышева д.15А, стр.2, помещ. К 52\nОГРН 1266700001501"
@@ -248,24 +244,61 @@ def generate_act():
     buf.seek(0)
     return buf
 
+# --- КОНВЕРТЕР ФОРМАТОВ ---
+def convert_doc(doc_buf, target_fmt):
+    docx_bytes = doc_buf.getvalue()
+    
+    if target_fmt == "PDF":
+        try:
+            with tempfile.NamedTemporaryFile(delete=False, suffix=".docx") as tmp_in:
+                tmp_in.write(docx_bytes)
+                tmp_in_path = tmp_in.name
+            
+            out_dir = tempfile.gettempdir()
+            subprocess.run(["soffice", "--headless", "--convert-to", "pdf", tmp_in_path, "--outdir", out_dir], check=True)
+            pdf_path = os.path.join(out_dir, os.path.splitext(os.path.basename(tmp_in_path))[0] + ".pdf")
+            
+            with open(pdf_path, "rb") as f:
+                res_bytes = f.read()
+            return res_bytes, "application/pdf", "pdf"
+        except Exception:
+            st.error("Ошибка генерации PDF. Убедитесь, что добавлен файл packages.txt с 'libreoffice'.")
+            return docx_bytes, "application/vnd.openxmlformats-officedocument.wordprocessingml.document", "docx"
+            
+    elif target_fmt == "TXT":
+        doc = Document(io.BytesIO(docx_bytes))
+        lines = [p.text for p in doc.paragraphs if p.text.strip()]
+        for t in doc.tables:
+            for row in t.rows:
+                lines.append(" | ".join([cell.text.replace('\n', ' ') for cell in row.cells]))
+        return "\n".join(lines).encode('utf-8'), "text/plain", "txt"
+        
+    else: # DOCX
+        return docx_bytes, "application/vnd.openxmlformats-officedocument.wordprocessingml.document", "docx"
+
 # --- КНОПКИ СКАЧИВАНИЯ ---
 st.subheader("3. Сформировать и скачать файлы")
 
+output_format = st.selectbox("Выберите формат для скачивания:", ["DOCX (.docx)", "PDF (.pdf)", "TXT (.txt)"])
+fmt_code = output_format.split()[0]
+
 c_btn1, c_btn2 = st.columns(2)
+
+invoice_data, inv_mime, inv_ext = convert_doc(build_invoice_doc(), fmt_code)
+act_data, act_mime, act_ext = convert_doc(build_act_doc(), fmt_code)
 
 with c_btn1:
     st.download_button(
-        label="📄 Скачать Счёт (.docx)",
-        data=generate_invoice(),
-        file_name=f"Счет_{doc_num}_от_{doc_date}.docx",
-        mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+        label=f"📄 Скачать Счёт ({fmt_code})",
+        data=invoice_data,
+        file_name=f"Счет_{doc_num}_от_{doc_date}.{inv_ext}",
+        mime=inv_mime
     )
 
 with c_btn2:
     st.download_button(
-        label="📝 Скачать Акт (.docx)",
-        data=generate_act(),
-        file_name=f"Акт_{doc_num}_от_{doc_date}.docx",
-        mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+        label=f"📝 Скачать Акт ({fmt_code})",
+        data=act_data,
+        file_name=f"Акт_{doc_num}_от_{doc_date}.{act_ext}",
+        mime=act_mime
     )
-    
