@@ -1,45 +1,131 @@
 import io
+import json
 import streamlit as st
+import google.generativeai as genai
 from docx import Document
 from docx.shared import Pt, Inches
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 
-st.set_page_config(page_title="Генератор Счетов и Актов", layout="wide")
-st.title("🚚 Документы ООО «АВРОРА-ТРАНЗИТ»")
+st.set_page_config(page_title="Автоматизация Документов", layout="wide")
+st.title("🚚 Автоматическое формирование Актов и Счетов")
 
-# --- ПОЛЯ ВВОДА ---
-st.subheader("1. Основные реквизиты договора и перевозки")
+# --- НАСТРОЙКА КЛЮЧА GEMINI ---
+with st.sidebar:
+    st.header("⚙️ Настройки AI")
+    # Пробуем взять из секретов облака или из поля ввода
+    default_key = st.secrets.get("GEMINI_API_KEY", "")
+    api_key = st.text_input("Gemini API Key", value=default_key, type="password")
 
+# --- РАСПОЗНАВАНИЕ ЧЕРЕЗ GEMINI ---
+st.subheader("1. Загрузка документа (PDF, PNG, JPG)")
+uploaded_file = st.file_uploader("Загрузите договор-заявку или скан", type=["pdf", "png", "jpg", "jpeg"])
+
+# Значения по умолчанию для формы
+if "doc_data" not in st.session_state:
+    st.session_state.doc_data = {
+        "doc_num": "20",
+        "doc_date": "23.07.2026",
+        "order_num": "20",
+        "order_date": "23.07.2026",
+        "city": "г. Смоленск",
+        "customer_name": "ООО «ФорГлэйд»",
+        "customer_director": "Осипчика М.П.",
+        "customer_details": "УНП: 590940553, РБ 231940, Гродненская обл, Зельвенский р-н, д. Бережки 1В",
+        "customer_signer": "Осипчик М.П.",
+        "route": "Московская обл., г. Щелково — д. Бережки, Зельвенский р-н",
+        "transport_details": "Авто: Renault Premium 450.19T/SCHMITZ SPR 24/L-13.62EB, Гос. номер: Р712HX67/AM385467, Водитель: Галенда Сергей Владимирович",
+        "cmr_numbers": "б/н",
+        "amount_num": "1 080,00",
+        "amount_words": "Одна тысяча восемьдесят",
+        "currency": "белорусских рублей",
+        "nds": "0%",
+        "payment_terms": "в день предоставления акта выполненных работ"
+    }
+
+if st.button("🤖 Распознать документ через AI"):
+    if not api_key:
+        st.error("Укажите Gemini API Key в левой панели!")
+    elif not uploaded_file:
+        st.warning("Загрузите файл документа.")
+    else:
+        try:
+            genai.configure(api_key=api_key)
+            model = genai.GenerativeModel("gemini-1.5-flash")
+
+            with st.spinner("Нейросеть считывает реквизиты и данные перевозки..."):
+                file_bytes = uploaded_file.getvalue()
+                mime_type = uploaded_file.type
+
+                prompt = """
+                Проанализируй документ (заявку/договор на грузоперевозку) и верни данные В СТРОГОМ JSON-формате без лишних слов и без разметки markdown.
+                Структура JSON:
+                {
+                    "doc_num": "номер заявки/договора",
+                    "doc_date": "дата документа в формате ДД.ММ.ГГГГ",
+                    "order_num": "номер заказа",
+                    "order_date": "дата заказа",
+                    "city": "г. Смоленск",
+                    "customer_name": "название Заказчика (например, ООО «ФорГлэйд»)",
+                    "customer_director": "ФИО директора Заказчика в родительном падеже",
+                    "customer_details": "УНП, юридический адрес и банковские реквизиты Заказчика",
+                    "customer_signer": "Фамилия И.О. подписывающего со стороны Заказчика",
+                    "route": "Маршрут перевозки (откуда - куда)",
+                    "transport_details": "Марка, гос. номер авто, прицепа и ФИО водителя",
+                    "cmr_numbers": "номера CMR (если указаны, иначе б/н)",
+                    "amount_num": "сумма цифрами (например, 1 080,00)",
+                    "amount_words": "сумма прописью",
+                    "currency": "валюта платежа (белорусских рублей / российских рублей / евро)",
+                    "nds": "ставка НДС (например, 0% или Без НДС)",
+                    "payment_terms": "условия и сроки оплаты"
+                }
+                """
+
+                response = model.generate_content([
+                    {"mime_type": mime_type, "data": file_bytes},
+                    prompt
+                ])
+
+                # Очистка и парсинг JSON
+                raw_text = response.text.strip().replace("```json", "").replace("```", "")
+                parsed_json = json.loads(raw_text)
+                st.session_state.doc_data.update(parsed_json)
+                st.success("Данные успешно извлечены нейросетью!")
+
+        except Exception as e:
+            st.error(f"Ошибка распознавания: {e}")
+
+# --- ФОРМА ПРОВЕРКИ И РЕДАКТИРОВАНИЯ ---
+st.subheader("2. Проверка распознанных данных")
+
+data = st.session_state.doc_data
 col1, col2 = st.columns(2)
 
 with col1:
-    doc_num = st.text_input("Номер заявки / счета / акта", value="14")
-    doc_date = st.text_input("Дата документа", value="15.07.2026")
-    order_num = st.text_input("Номер транспортного заказа (для Акта)", value="01-07")
-    order_date = st.text_input("Дата заказа", value="10.07.2026")
-    city = st.text_input("Город составления Акта", value="г. Смоленск")
+    doc_num = st.text_input("Номер заявки / акта / счета", value=data.get("doc_num", ""))
+    doc_date = st.text_input("Дата документа", value=data.get("doc_date", ""))
+    order_num = st.text_input("Номер заказа", value=data.get("order_num", ""))
+    order_date = st.text_input("Дата заказа", value=data.get("order_date", ""))
+    city = st.text_input("Город составления", value=data.get("city", "г. Смоленск"))
     
     st.markdown("---")
-    st.markdown("**Данные Заказчика:**")
-    customer_name = st.text_input("Наименование Заказчика", value="ООО «Егорчик»")
-    customer_director = st.text_input("ФИО директора (в родительном падеже)", value="Насирова Олега Холмуродовича")
-    customer_details = st.text_area("Полные реквизиты/адрес Заказчика", value="230026, РБ, г. Гродно, ул. Победы 17, УНП 591503882")
-    customer_signer = st.text_input("Подпись Заказчика (ФИО)", value="Насиров О.Х.")
+    customer_name = st.text_input("Заказчик", value=data.get("customer_name", ""))
+    customer_director = st.text_input("Директор Заказчика (в родительном падеже)", value=data.get("customer_director", ""))
+    customer_details = st.text_area("Реквизиты Заказчика", value=data.get("customer_details", ""))
+    customer_signer = st.text_input("Подпись Заказчика", value=data.get("customer_signer", ""))
 
 with col2:
-    route = st.text_input("Маршрут перевозки", value="РБ, ТЛЦ Брузги (место перецепки) - РБ")
-    transport_details = st.text_input("Детали ТС / перецепка (для Акта)", value="в том числе на этапе перевозки после перецепки на ТЛЦ Брузги, ТС М226ЕО67 / 3TA7860")
-    cmr_numbers = st.text_input("Номера CMR (через запятую)", value="R456159, MA456028, MA455671, MA453832, R455456, MA455721, VB455624, R455078, IB454302")
+    route = st.text_input("Маршрут", value=data.get("route", ""))
+    transport_details = st.text_input("Детали ТС и водитель", value=data.get("transport_details", ""))
+    cmr_numbers = st.text_input("Номера CMR", value=data.get("cmr_numbers", "б/н"))
     
     st.markdown("---")
-    st.markdown("**Финансы:**")
-    amount_num = st.text_input("Сумма цифрами", value="1 450,00")
-    amount_words = st.text_input("Сумма прописью", value="Одна тысяча четыреста пятьдесят")
-    currency = st.selectbox("Валюта", ["евро", "белорусских рублей", "российских рублей"])
-    nds = st.text_input("НДС", value="Без НДС")
-    payment_terms = st.text_input("Условия конвертации", value="в российских рублях по курсу ЦБ РФ на дату оплаты")
+    amount_num = st.text_input("Сумма цифрами", value=data.get("amount_num", ""))
+    amount_words = st.text_input("Сумма прописью", value=data.get("amount_words", ""))
+    currency = st.text_input("Валюта", value=data.get("currency", "белорусских рублей"))
+    nds = st.text_input("НДС", value=data.get("nds", "0%"))
+    payment_terms = st.text_input("Условия оплаты", value=data.get("payment_terms", ""))
 
-# --- ФУНКЦИЯ: СЧЕТ НА ОПЛАТУ (ПО ОБРАЗЦУ INVOICE-25) ---
+# --- ФУНКЦИИ ГЕНЕРАЦИИ DOCX ---
 def generate_invoice():
     doc = Document()
     
@@ -59,7 +145,6 @@ def generate_invoice():
 
     doc.add_paragraph()
     
-    # Исполнитель и Заказчик
     p_party = doc.add_paragraph()
     p_party.add_run("Исполнитель: ").bold = True
     p_party.add_run("ООО \"АВРОРА-ТРАНЗИТ\", 214022, РОССИЯ, Смоленская область, Смоленск, ул Карбышева, 15а, 2, К 52\n")
@@ -68,13 +153,10 @@ def generate_invoice():
     p_party.add_run("Комментарий: ").bold = True
     p_party.add_run(f"Договор-заявка № {doc_num} от {doc_date}г. {payment_terms}.")
 
-    # Заголовок Счета
     h = doc.add_paragraph(f"\nСчет на оплату №{doc_num} от {doc_date} г.")
-    h.alignment = WD_ALIGN_PARAGRAPH.LEFT
     h.runs[0].bold = True
     h.runs[0].font.size = Pt(14)
 
-    # Таблица услуг
     t_services = doc.add_table(rows=2, cols=6)
     t_services.style = 'Table Grid'
     
@@ -90,7 +172,6 @@ def generate_invoice():
     row[4].text = nds
     row[5].text = amount_num
 
-    # Итоги
     doc.add_paragraph()
     p_total = doc.add_paragraph()
     p_total.alignment = WD_ALIGN_PARAGRAPH.RIGHT
@@ -104,7 +185,6 @@ def generate_invoice():
     buf.seek(0)
     return buf
 
-# --- ФУНКЦИЯ: АКТ ВЫПОЛНЕННЫХ РАБОТ (ПО ОБРАЗЦУ АКТ 14) ---
 def generate_act():
     doc = Document()
     
@@ -158,7 +238,7 @@ def generate_act():
     
     table = doc.add_table(rows=2, cols=2)
     table.rows[0].cells[0].text = f"{customer_name}\n{customer_details}"
-    table.rows[0].cells[1].text = "ООО «АВРОРА-ТРАНЗИТ»\n14022, РФ г. Смоленск\nул. Карбышева д.15А, стр.2, помещ. К 52\nОГРН 1266700001501"
+    table.rows[0].cells[1].text = "ООО «АВРОРА-ТРАНЗИТ»\n214022, РФ г. Смоленск\nул. Карбышева д.15А, стр.2, помещ. К 52\nОГРН 1266700001501"
     
     table.rows[1].cells[0].text = f"\n\n___________________ {customer_signer}"
     table.rows[1].cells[1].text = "\n\n___________________ Галенда С.В."
@@ -169,7 +249,7 @@ def generate_act():
     return buf
 
 # --- КНОПКИ СКАЧИВАНИЯ ---
-st.subheader("2. Сформировать и скачать файлы")
+st.subheader("3. Сформировать и скачать файлы")
 
 c_btn1, c_btn2 = st.columns(2)
 
